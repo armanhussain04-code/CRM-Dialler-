@@ -1,0 +1,7 @@
+{
+  "name": "Arman Solutions - CRM & Dialer",
+  "description": "A high-performance CRM and automated call dialer system for Arman Solutions.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
