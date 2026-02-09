@@ -1,6 +1,11 @@
 {
-  "name": "Arman Solutions - CRM & Dialer",
-  "description": "A high-performance CRM and automated call dialer system for Arman Solutions.",
+  "name": "Arman Solutions CRM",
+  "short_name": "Arman CRM",
+  "description": "High-performance dialer and CRM system.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#4f46e5",
   "requestFramePermissions": [
     "microphone"
   ]

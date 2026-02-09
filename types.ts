@@ -4,7 +4,7 @@ export enum UserRole {
   AGENT = 'agent'
 }
 
-export type LeadStatus = 'pending' | 'interested' | 'not_interested' | 'not_received';
+export type LeadStatus = 'pending' | 'interested' | 'not_interested' | 'not_received' | 'call_back' | 'complete' | 'invalid';
 
 export interface Lead {
   id: string;
@@ -19,7 +19,7 @@ export interface Lead {
 export interface CallOutcome {
   id: string;
   leadId: string;
-  name: string;
+  name: string; // The updated name found during call
   phone: string;
   status: LeadStatus;
   notes?: string;

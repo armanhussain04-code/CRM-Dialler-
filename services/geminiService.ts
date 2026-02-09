@@ -35,6 +35,38 @@ export const getGeminiClient = () => {
   return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
+export const verifyNoteQuality = async (note: string, duration: string): Promise<{ isValid: boolean, reason?: string }> => {
+  const ai = getGeminiClient();
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `Audit this CRM call note for quality. 
+      Duration: ${duration}
+      Note: "${note}"
+      
+      Is this note meaningful and related to a business call? 
+      Reject if it's:
+      1. Gibberish (e.g. "asdfgh")
+      2. Highly repetitive (e.g. "ok ok ok ok ok")
+      3. Too generic for a long call (e.g. just saying "done" for a 5 minute call)
+      4. Completely unrelated text.
+
+      Respond ONLY in JSON format: {"isValid": boolean, "reason": "short explanation in Hindi/English if invalid"}`,
+      config: {
+        responseMimeType: "application/json",
+      }
+    });
+
+    const result = JSON.parse(response.text || '{"isValid": true}');
+    return result;
+  } catch (err) {
+    console.error("AI Audit failed, falling back to basic check", err);
+    // Fallback if API fails: basic length and repetition check
+    const isRepetitive = /(.)\1{4,}/.test(note) || note.split(' ').length < 2 && duration.includes('m');
+    return { isValid: !isRepetitive };
+  }
+};
+
 export const generateSpeech = async (text: string, voiceName: string = 'Kore') => {
   const ai = getGeminiClient();
   const response = await ai.models.generateContent({

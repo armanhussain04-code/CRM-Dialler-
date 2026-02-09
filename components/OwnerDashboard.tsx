@@ -1,12 +1,12 @@
 
 import React, { useState, useRef, useMemo } from 'react';
-import { Lead } from '../types.ts';
-import { clearAllData } from '../services/crmService.ts';
+import { Lead, LeadStatus } from '../types.ts';
 
 interface Props {
   leads: Lead[];
   onAddLead: (lead: Lead) => Promise<void>;
   onDeleteLead: (id: string) => Promise<void>;
+  onDeleteByStatus: (status: LeadStatus) => Promise<void>;
   onRecycleLead: (id: string) => Promise<void>;
   onBulkUpload: (leads: any[]) => Promise<void>;
   passwords: { admin: string, agent: string };
@@ -14,257 +14,334 @@ interface Props {
 }
 
 type MainTab = 'pool' | 'manual' | 'settings';
-type PoolFilter = 'pending' | 'interested' | 'not_interested' | 'not_received';
+type ManualSubTab = 'single' | 'bulk' | 'paste' | 'wrong';
+type PoolFilter = 'pending' | 'interested' | 'not_interested' | 'not_received' | 'call_back' | 'complete';
 
 const OwnerDashboard: React.FC<Props> = ({ 
   leads,
   onAddLead,
   onDeleteLead,
+  onDeleteByStatus,
   onRecycleLead,
   onBulkUpload,
   passwords, 
   onUpdatePasswords
 }) => {
   const [activeMainTab, setActiveMainTab] = useState<MainTab>('pool');
+  const [activeManualSubTab, setActiveManualSubTab] = useState<ManualSubTab>('single');
   const [activePoolFilter, setActivePoolFilter] = useState<PoolFilter>('pending');
   const [searchQuery, setSearchQuery] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [pasteData, setPasteData] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [tempPasswords, setTempPasswords] = useState({ ...passwords });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filteredLeads = useMemo(() => {
-    return leads
-      .filter(l => String(l.status).toLowerCase() === String(activePoolFilter).toLowerCase())
-      .filter(l => {
-        const query = searchQuery.toLowerCase();
-        return l.name.toLowerCase().includes(query) || l.phone.includes(query);
-      });
+    const query = searchQuery.toLowerCase().trim();
+    const filter = activePoolFilter.toLowerCase();
+    return leads.filter(l => {
+      const leadStatus = (l.status || 'pending').toLowerCase();
+      const matchesFilter = leadStatus === filter;
+      const matchesSearch = query === '' || 
+        (l.name || '').toLowerCase().includes(query) || 
+        (l.phone || '').includes(query);
+      return matchesFilter && matchesSearch;
+    });
   }, [leads, activePoolFilter, searchQuery]);
 
-  const handleExportCSV = () => {
-    if (leads.length === 0) return alert("Nothing to export.");
-    const headers = ['Identity', 'Mobile', 'Current Status', 'Talk Time', 'Agent Notes', 'Last Sync'];
-    const rows = leads.map(l => [
-      `"${l.name}"`, 
-      `"${l.phone}"`, 
-      `"${l.status.toUpperCase()}"`, 
-      `"${l.duration || '--'}"`, 
-      `"${(l.notes || '').replace(/"/g, '""')}"`,
-      `"${new Date().toLocaleString()}"`
-    ]);
-    const csvContent = "\ufeff" + [headers, ...rows].map(e => e.join(",")).join("\n");
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `Arman_Solutions_Report_${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+  const wrongLeads = useMemo(() => leads.filter(l => (l.status || '').toLowerCase() === 'invalid'), [leads]);
 
-  const handleManualAdd = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const form = e.target as HTMLFormElement;
-    const name = (form.elements.namedItem('name') as HTMLInputElement).value.trim();
-    const phone = (form.elements.namedItem('phone') as HTMLInputElement).value.trim();
-    if (!name || !phone) return;
-
+  const handleExecuteDelete = async (id: string) => {
     setIsProcessing(true);
     try {
-      await onAddLead({ id: crypto.randomUUID(), name, phone, status: 'pending' });
-      form.reset();
-      setActivePoolFilter('pending');
-      setActiveMainTab('pool');
-    } catch {
-      alert("Error adding lead.");
+      await onDeleteLead(id);
+      setConfirmDeleteId(null);
+    } catch (err) {
+      alert(`Delete Failed.`);
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleBulkCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleRestoreLead = async (id: string) => {
+    setIsProcessing(true);
+    try {
+      await onRecycleLead(id);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleRestoreAllNoAnswer = async () => {
+    if (!confirm("Restore ALL 'No Answer' leads to 'New' list?")) return;
+    setIsProcessing(true);
+    try {
+      const noAnswerLeads = leads.filter(l => l.status === 'not_received');
+      for (const lead of noAnswerLeads) {
+        await onRecycleLead(lead.id);
+      }
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handlePasteSubmit = async () => {
+    if (!pasteData.trim()) return;
+    setIsProcessing(true);
+    try {
+      const lines = pasteData.split(/[\n,]/);
+      const batch = lines.map(line => ({ phone: line.trim() })).filter(l => l.phone.length > 0);
+      await onBulkUpload(batch);
+      setPasteData('');
+      setActiveMainTab('pool');
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setIsProcessing(true);
     const reader = new FileReader();
     reader.onload = async (event) => {
-      const text = event.target?.result as string;
-      const data = text.split('\n').slice(1).map(line => {
-        const parts = line.split(',');
-        return { name: parts[0]?.trim(), phone: parts[1]?.trim() };
-      }).filter(l => l.name && l.phone);
-      if (data.length > 0) {
-        await onBulkUpload(data);
-        alert(`Successfully injected ${data.length} records.`);
+      try {
+        const text = event.target?.result as string;
+        const lines = text.split('\n');
+        const batch = lines.slice(1).map(line => {
+          const parts = line.split(',');
+          return { name: parts[0]?.trim(), phone: parts[1]?.trim() };
+        }).filter(l => l.phone && l.phone.length > 0);
+        await onBulkUpload(batch);
+        setActiveMainTab('pool');
+      } catch (err: any) {
+        alert("File error: " + err.message);
+      } finally {
+        setIsProcessing(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       }
     };
     reader.readAsText(file);
   };
 
+  const handleExportCSV = () => {
+    if (filteredLeads.length === 0) return;
+    const headers = ["Name", "Phone", "Status", "Duration", "Notes", "Date"];
+    const rows = filteredLeads.map(l => [
+      l.name || 'N/A', l.phone, l.status.toUpperCase(), l.duration || '0s',
+      (l.notes || '').replace(/,/g, ' ').replace(/\n/g, ' '),
+      l.timestamp ? new Date(l.timestamp).toLocaleDateString() : 'New'
+    ]);
+    const csvContent = [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Leads_${activePoolFilter}.csv`;
+    link.click();
+  };
+
   return (
-    <div className="h-full flex flex-col p-4 md:p-6 overflow-hidden max-w-[1600px] mx-auto space-y-6">
-      {/* Top Controls */}
-      <div className="shrink-0 flex flex-col lg:flex-row justify-between items-center gap-4 bg-slate-900/60 p-4 rounded-3xl border border-white/5 shadow-2xl">
-        <div className="flex bg-slate-950 p-1.5 rounded-2xl border border-white/5">
-          {[
-            { id: 'pool', label: 'DATABASE' },
-            { id: 'manual', label: 'INJECTION' },
-            { id: 'settings', label: 'SECURITY' }
-          ].map(tab => (
-            <button 
-              key={tab.id} 
-              onClick={() => setActiveMainTab(tab.id as MainTab)}
-              className={`px-8 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-[0.2em] transition-all ${activeMainTab === tab.id ? 'bg-indigo-600 text-white shadow-xl' : 'text-slate-500 hover:text-slate-300'}`}
-            >
-              {tab.label}
-            </button>
+    <div className="h-full flex flex-col p-4 md:p-8 overflow-hidden max-w-[1500px] mx-auto space-y-4 md:space-y-8 animate-in fade-in duration-500">
+      <div className="shrink-0 flex flex-col xl:flex-row justify-between items-center gap-4 md:gap-6 glass p-4 md:p-6 rounded-2xl md:rounded-[2rem] border border-white/5 shadow-2xl">
+        <div className="flex bg-slate-950/50 p-1 rounded-xl md:rounded-2xl border border-white/5 w-full xl:w-auto">
+          {[{ id: 'pool', label: 'DATABASE' }, { id: 'manual', label: 'ADD ENTRY' }, { id: 'settings', label: 'PIN' }].map(tab => (
+            <button key={tab.id} onClick={() => setActiveMainTab(tab.id as MainTab)} className={`flex-1 xl:flex-none px-4 md:px-8 py-2 md:py-3 rounded-lg md:rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all ${activeMainTab === tab.id ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>{tab.label}</button>
           ))}
         </div>
-        
-        <div className="flex-1 max-w-2xl w-full flex gap-3">
-          <div className="relative flex-1">
+        {activeMainTab === 'pool' && (
+          <div className="flex-1 w-full flex gap-2">
             <input 
               type="text" 
-              placeholder="Filter by name or mobile..." 
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-950 border border-white/10 rounded-2xl px-6 py-3 text-white text-[11px] font-bold outline-none focus:border-indigo-500 transition-all shadow-inner"
+              placeholder="Search..." 
+              value={searchQuery} 
+              onChange={e => setSearchQuery(e.target.value)} 
+              className="flex-1 bg-slate-950/80 border border-white/10 rounded-xl md:rounded-2xl px-4 md:px-6 py-3 md:py-4 text-white text-[10px] md:text-[11px] font-bold outline-none focus:border-indigo-500 shadow-inner" 
             />
+            <button 
+              onClick={handleExportCSV}
+              className="p-3 md:px-6 md:py-4 bg-emerald-600/10 border border-emerald-500/20 text-emerald-500 rounded-xl md:rounded-2xl flex items-center justify-center gap-2 hover:bg-emerald-600 hover:text-white transition-all active:scale-95"
+            >
+              <svg className="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+            </button>
           </div>
-          <button onClick={handleExportCSV} className="px-6 py-3 bg-emerald-600/10 text-emerald-500 border border-emerald-600/20 rounded-2xl font-black uppercase tracking-widest text-[10px] hover:bg-emerald-600 hover:text-white transition-all shadow-xl flex items-center gap-2">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-            Export CSV
-          </button>
-        </div>
+        )}
       </div>
 
       {activeMainTab === 'pool' && (
-        <div className="flex-1 flex flex-col min-h-0 space-y-4 animate-in fade-in duration-500">
-          {/* Sub Filters */}
-          <div className="shrink-0 flex items-center justify-between">
-            <div className="flex bg-slate-900/40 p-1 rounded-2xl border border-white/5 shadow-lg overflow-x-auto custom-scrollbar">
+        <div className="flex-1 flex flex-col min-h-0 space-y-4 md:space-y-6">
+          <div className="shrink-0 flex items-center justify-between flex-wrap gap-2 md:gap-4">
+            <div className="flex bg-slate-900/30 p-1 rounded-xl md:rounded-2xl border border-white/5 overflow-x-auto no-scrollbar w-full xl:w-auto">
               {[
-                { id: 'pending', label: 'New Pool', color: 'text-amber-500' },
-                { id: 'interested', label: 'Interested', color: 'text-emerald-500' },
-                { id: 'not_interested', label: 'Rejected', color: 'text-red-500' },
-                { id: 'not_received', label: 'No Answer', color: 'text-indigo-400' }
+                { id: 'pending', label: 'New' },
+                { id: 'interested', label: 'Interested' },
+                { id: 'call_back', label: 'Callback' },
+                { id: 'complete', label: 'Done' },
+                { id: 'not_received', label: 'No Answer' },
+                { id: 'not_interested', label: 'Rejected' }
               ].map(filter => (
-                <button 
-                  key={filter.id} 
-                  onClick={() => setActivePoolFilter(filter.id as PoolFilter)}
-                  className={`flex items-center gap-3 px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all whitespace-nowrap ${activePoolFilter === filter.id ? 'bg-slate-800 text-white border border-white/10' : 'text-slate-600 hover:text-slate-400'}`}
-                >
-                  <span className={activePoolFilter === filter.id ? filter.color : 'text-current'}>{filter.label}</span>
-                  <span className="px-2.5 py-0.5 rounded-lg bg-slate-950 text-[9px] font-mono border border-white/5">{leads.filter(l => l.status === filter.id).length}</span>
+                <button key={filter.id} onClick={() => setActivePoolFilter(filter.id as PoolFilter)} className={`flex-1 xl:flex-none flex items-center gap-2 px-3 md:px-6 py-2 md:py-3.5 rounded-lg md:rounded-xl text-[8px] md:text-[10px] font-black uppercase transition-all whitespace-nowrap ${activePoolFilter === filter.id ? 'bg-slate-800 text-white shadow-lg' : 'text-slate-600 hover:text-slate-400'}`}>
+                  <span>{filter.label}</span>
+                  <span className="px-1.5 py-0.5 rounded-md font-mono text-[8px] bg-slate-950">{leads.filter(l => (l.status || 'pending').toLowerCase() === filter.id).length}</span>
                 </button>
               ))}
             </div>
-            {activePoolFilter === 'pending' && (
-              <button onClick={() => fileInputRef.current?.click()} className="px-8 py-3 bg-indigo-600 text-white rounded-xl text-[10px] font-black uppercase tracking-[0.2em] shadow-2xl hover:bg-indigo-500 transition-all">
-                Bulk Injection
-              </button>
+            {activePoolFilter === 'not_received' && filteredLeads.length > 0 && (
+              <button onClick={handleRestoreAllNoAnswer} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest shadow-xl">Restore All</button>
             )}
-            <input type="file" ref={fileInputRef} onChange={handleBulkCSV} className="hidden" accept=".csv" />
           </div>
 
-          {/* Table Area */}
-          <div className="flex-1 glass rounded-[3rem] border border-white/5 overflow-hidden flex flex-col shadow-2xl">
-            <div className="flex-1 overflow-auto custom-scrollbar">
-              <table className="w-full text-left border-separate border-spacing-0">
-                <thead className="sticky top-0 bg-slate-900 z-10">
-                  <tr className="text-[10px] text-slate-500 font-black uppercase tracking-[0.3em]">
-                    <th className="py-6 px-10 border-b border-white/5">Identity</th>
-                    <th className="py-6 px-10 border-b border-white/5">Connection</th>
-                    <th className="py-6 px-10 border-b border-white/5">Interaction</th>
-                    <th className="py-6 px-10 border-b border-white/5 text-right">Actions</th>
-                  </tr>
+          <div className="flex-1 glass rounded-2xl md:rounded-[2.5rem] border border-white/5 overflow-hidden flex flex-col shadow-2xl">
+            <div className="flex-1 overflow-x-auto custom-scrollbar">
+              <table className="w-full text-left border-separate border-spacing-0 min-w-[700px]">
+                <thead className="sticky top-0 bg-[#0f172a]/95 backdrop-blur-md z-20">
+                  <tr className="text-[9px] md:text-[10px] text-slate-500 font-black uppercase tracking-[0.2em]"><th className="py-4 md:py-7 px-6 md:px-10 border-b border-white/5">Customer Info</th><th className="py-4 md:py-7 px-6 md:px-10 border-b border-white/5">Conversation</th><th className="py-4 md:py-7 px-6 md:px-10 border-b border-white/5 text-right">Actions</th></tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
                   {filteredLeads.map(l => (
-                    <tr key={l.id} className="hover:bg-white/[0.02] transition-colors group">
-                      <td className="py-5 px-10">
-                        <div className="font-black text-white text-sm uppercase tracking-tight leading-none">{l.name}</div>
-                        <div className="text-[10px] text-slate-500 font-mono mt-2 tracking-widest">{l.phone}</div>
+                    <tr key={l.id} className="hover:bg-white/[0.03] transition-all duration-300">
+                      <td className="py-4 md:py-6 px-6 md:px-10 align-top">
+                        <div className="font-black text-white text-xs md:text-sm uppercase mb-1">{l.name}</div>
+                        <div className="text-[9px] md:text-[10px] font-mono text-slate-500">{l.phone}</div>
                       </td>
-                      <td className="py-5 px-10">
-                        <div className="inline-flex px-3 py-1 rounded-lg bg-indigo-600/10 border border-indigo-600/20 text-[9px] text-indigo-400 font-black uppercase tracking-widest">
-                          {l.duration || '--'}
+                      <td className="py-4 md:py-6 px-6 md:px-10 align-top">
+                        <div className="text-[8px] md:text-[9px] text-indigo-400 font-black uppercase mb-1">{l.duration || '0s'} • {l.timestamp ? new Date(l.timestamp).toLocaleDateString() : 'New'}</div>
+                        <div className="text-[10px] md:text-[11px] text-slate-300 italic whitespace-pre-wrap leading-relaxed">
+                          {l.notes || 'No notes.'}
                         </div>
                       </td>
-                      <td className="py-5 px-10">
-                        <div className="text-[11px] text-slate-600 italic max-w-md truncate group-hover:whitespace-normal group-hover:text-slate-400 transition-all">
-                          {l.notes || 'No summary available.'}
-                        </div>
-                      </td>
-                      <td className="py-5 px-10 text-right space-x-2">
-                        {activePoolFilter !== 'pending' && (
-                          <button onClick={() => onRecycleLead(l.id)} className="px-4 py-2 bg-indigo-600/10 text-indigo-500 border border-indigo-600/20 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-indigo-600 hover:text-white transition-all">Restore</button>
+                      <td className="py-4 md:py-6 px-6 md:px-10 text-right align-top space-x-1">
+                        {activePoolFilter === 'not_received' && (
+                          <button onClick={() => handleRestoreLead(l.id)} className="w-8 h-8 md:w-10 md:h-10 inline-flex items-center justify-center bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 rounded-lg hover:bg-indigo-600 hover:text-white transition-all"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg></button>
                         )}
-                        <button onClick={() => { if(confirm("Permanently remove this lead?")) onDeleteLead(l.id); }} className="px-4 py-2 bg-red-600/10 text-red-500 border border-red-600/20 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-red-600 hover:text-white transition-all">Delete</button>
+                        {confirmDeleteId === l.id ? (
+                          <button onClick={() => handleExecuteDelete(l.id)} className="px-3 py-1.5 md:px-4 md:py-2 bg-rose-600 text-white rounded-lg text-[8px] font-black uppercase tracking-tighter">DELETE</button>
+                        ) : (
+                          <button onClick={() => setConfirmDeleteId(l.id)} className="w-8 h-8 md:w-10 md:h-10 inline-flex items-center justify-center bg-rose-600/10 text-rose-500 border border-rose-500/20 rounded-lg hover:bg-rose-600 hover:text-white transition-all"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                        )}
                       </td>
                     </tr>
                   ))}
+                  {filteredLeads.length === 0 && (
+                    <tr><td colSpan={3} className="py-20 text-center text-slate-700 italic font-black uppercase tracking-widest opacity-30 text-xs">No Records Found</td></tr>
+                  )}
                 </tbody>
               </table>
-              {filteredLeads.length === 0 && (
-                <div className="py-40 text-center space-y-4">
-                  <div className="text-4xl opacity-20">📂</div>
-                  <div className="text-slate-800 text-xs font-black uppercase tracking-[0.5em]">No Data in this vault</div>
-                </div>
-              )}
             </div>
           </div>
         </div>
       )}
 
       {activeMainTab === 'manual' && (
-        <div className="flex-1 flex items-center justify-center animate-in zoom-in-95 duration-500">
-          <form onSubmit={handleManualAdd} className="max-w-md w-full glass p-12 rounded-[4rem] space-y-10 shadow-2xl border border-white/5 relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-8 opacity-5">
-               <svg className="w-32 h-32 text-indigo-500" fill="currentColor" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-            </div>
-            <div className="text-center space-y-2">
-              <h3 className="text-2xl font-black text-white uppercase tracking-tighter italic">LEAD <span className="text-indigo-500 not-italic">INJECTION</span></h3>
-              <p className="text-[9px] text-slate-600 font-bold uppercase tracking-[0.4em]">Manual Override Mode</p>
-            </div>
-            <div className="space-y-4">
-              <input name="name" required placeholder="Full Name" className="w-full bg-slate-950 border border-white/10 rounded-3xl px-8 py-5 text-white text-sm font-bold shadow-inner placeholder:text-slate-800" />
-              <input name="phone" required placeholder="Mobile / WhatsApp" className="w-full bg-slate-950 border border-white/10 rounded-3xl px-8 py-5 text-white text-sm font-mono shadow-inner placeholder:text-slate-800" />
-              <button type="submit" disabled={isProcessing} className="w-full py-6 bg-indigo-600 text-white rounded-[2rem] font-black text-xs uppercase tracking-[0.3em] hover:bg-indigo-500 shadow-2xl transition-all active:scale-95">
-                {isProcessing ? 'SYNCHRONIZING...' : 'CONFIRM INJECTION'}
-              </button>
-            </div>
-          </form>
+        <div className="flex-1 flex flex-col items-center justify-center space-y-4 md:space-y-8 overflow-y-auto pt-4">
+           <div className="bg-slate-950/50 p-1 rounded-xl border border-white/5 flex flex-wrap justify-center max-w-full">
+              {[{id:'single',label:'MANUAL'},{id:'paste',label:'PASTE'},{id:'bulk',label:'CSV FILE'},{id:'wrong',label:`TRASH`}].map(sub => (
+                <button key={sub.id} onClick={() => setActiveManualSubTab(sub.id as ManualSubTab)} className={`px-4 md:px-10 py-3 md:py-4 rounded-lg md:rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all ${activeManualSubTab === sub.id ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}>{sub.label}</button>
+              ))}
+           </div>
+           
+           <div className="w-full max-w-xl px-2 mb-8">
+             {activeManualSubTab === 'single' && (
+                <form onSubmit={async (e) => { e.preventDefault(); const f = e.target as any; await onAddLead({id:Date.now().toString(), name: f.name.value, phone: f.phone.value.replace(/\D/g,''), status:'pending'}); f.reset(); setActiveMainTab('pool'); }} className="glass p-8 md:p-12 rounded-[2rem] md:rounded-[3.5rem] space-y-6 md:space-y-10 border border-white/5 animate-in slide-in-from-bottom-4">
+                  <h3 className="text-xl md:text-3xl font-black text-white uppercase text-center italic tracking-tighter">ADD <span className="text-indigo-500 not-italic">ENTRY</span></h3>
+                  <div className="space-y-4 md:space-y-6">
+                    <input name="name" placeholder="Name (Optional)" className="w-full bg-slate-950/80 border border-white/10 rounded-xl md:rounded-2xl px-6 py-4 md:py-5 text-white text-sm font-bold outline-none focus:border-indigo-500" />
+                    <input name="phone" required placeholder="Phone Number" className="w-full bg-slate-950/80 border border-white/10 rounded-xl md:rounded-2xl px-6 py-4 md:py-5 text-white font-mono tracking-[0.2em] outline-none focus:border-indigo-500" />
+                    <button type="submit" disabled={isProcessing} className="w-full py-5 md:py-7 bg-indigo-600 text-white rounded-2xl md:rounded-[2rem] font-black text-[10px] md:text-[11px] uppercase tracking-widest shadow-xl active:scale-95 transition-all">SAVE LEAD</button>
+                  </div>
+                </form>
+             )}
+
+             {activeManualSubTab === 'paste' && (
+                <div className="glass p-8 md:p-12 rounded-[2rem] md:rounded-[3.5rem] space-y-6 md:space-y-10 border border-white/5 animate-in slide-in-from-bottom-4">
+                  <h3 className="text-xl md:text-3xl font-black text-white uppercase text-center italic tracking-tighter">PASTE <span className="text-indigo-500 not-italic">NUMBERS</span></h3>
+                  <div className="space-y-4 md:space-y-6">
+                    <textarea 
+                      placeholder="Paste numbers here (one per line or comma separated)..." 
+                      value={pasteData}
+                      onChange={e => setPasteData(e.target.value)}
+                      className="w-full h-48 bg-slate-950/80 border border-white/10 rounded-2xl p-6 text-white font-mono text-sm outline-none focus:border-indigo-500 transition-all"
+                    />
+                    <button onClick={handlePasteSubmit} disabled={isProcessing || !pasteData.trim()} className="w-full py-5 md:py-7 bg-indigo-600 text-white rounded-2xl md:rounded-[2rem] font-black text-[10px] md:text-[11px] uppercase tracking-widest shadow-xl active:scale-95 transition-all">PROCESS BATCH</button>
+                  </div>
+                </div>
+             )}
+
+             {activeManualSubTab === 'bulk' && (
+                <div className="glass p-8 md:p-12 rounded-[2rem] md:rounded-[3.5rem] space-y-8 md:space-y-10 border border-white/5 text-center animate-in slide-in-from-bottom-4">
+                  <h3 className="text-xl md:text-3xl font-black text-white uppercase italic tracking-tighter">UPLOAD <span className="text-indigo-500 not-italic">CSV</span></h3>
+                  <div className="p-8 border-2 border-dashed border-white/10 rounded-3xl bg-slate-950/50">
+                    <input type="file" accept=".csv,.txt" ref={fileInputRef} onChange={handleFileUpload} className="hidden" id="csv-upload" />
+                    <label htmlFor="csv-upload" className="cursor-pointer space-y-4 block">
+                      <div className="w-16 h-16 bg-indigo-600/10 rounded-full flex items-center justify-center mx-auto text-indigo-500">
+                        <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+                      </div>
+                      <div>
+                        <p className="text-white font-bold text-sm">Drop your CSV file here</p>
+                        <p className="text-slate-500 text-[10px] uppercase tracking-widest mt-1">Format: Name, Phone</p>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+             )}
+
+             {activeManualSubTab === 'wrong' && (
+                <div className="glass rounded-[2rem] border border-white/5 overflow-hidden flex flex-col shadow-2xl animate-in slide-in-from-bottom-4 max-h-[500px] w-full">
+                  <div className="p-6 border-b border-white/5 bg-slate-900/50">
+                    <h3 className="text-sm font-black text-white uppercase tracking-widest text-rose-500">TRASH / INVALID ({wrongLeads.length})</h3>
+                  </div>
+                  <div className="overflow-y-auto custom-scrollbar flex-1">
+                    {wrongLeads.length > 0 ? (
+                      <table className="w-full text-left">
+                        <tbody className="divide-y divide-white/5">
+                          {wrongLeads.map(l => (
+                            <tr key={l.id} className="hover:bg-white/[0.02]">
+                              <td className="p-4 px-6">
+                                <div className="text-white font-bold text-xs">{l.phone}</div>
+                                <div className="text-[9px] text-rose-500/70 uppercase font-bold">{l.notes || 'Invalid Lead'}</div>
+                              </td>
+                              <td className="p-4 px-6 text-right space-x-2">
+                                <button onClick={() => handleRestoreLead(l.id)} className="p-2 text-indigo-400 hover:bg-indigo-600 hover:text-white rounded-lg transition-all" title="Retry / Restore"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg></button>
+                                <button onClick={() => handleExecuteDelete(l.id)} className="p-2 text-rose-500 hover:bg-rose-600 hover:text-white rounded-lg transition-all" title="Delete Forever"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div className="py-20 text-center text-slate-700 italic font-black uppercase tracking-widest opacity-30 text-xs">Trash is Empty</div>
+                    )}
+                  </div>
+                </div>
+             )}
+           </div>
         </div>
       )}
 
       {activeMainTab === 'settings' && (
-        <div className="flex-1 flex items-center justify-center animate-in zoom-in-95 duration-500">
-          <div className="max-w-md w-full glass p-12 rounded-[4rem] space-y-12 shadow-2xl border border-white/5">
-            <div className="text-center space-y-2">
-              <h3 className="text-2xl font-black text-white uppercase tracking-tighter italic">SECURITY <span className="text-indigo-500 not-italic">PORTAL</span></h3>
-              <p className="text-[9px] text-slate-600 font-bold uppercase tracking-[0.4em]">Authorization Keys</p>
-            </div>
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <label className="text-[9px] font-black text-slate-600 uppercase ml-4 tracking-widest">Administrative PIN</label>
-                <input type="text" value={tempPasswords.admin} onChange={e => setTempPasswords({...tempPasswords, admin: e.target.value})} className="w-full bg-slate-950 border border-white/5 rounded-3xl px-8 py-5 text-white text-center font-black tracking-[0.6em] text-2xl shadow-inner" />
+        <div className="flex-1 flex flex-col items-center justify-center p-4">
+           <div className="max-w-md w-full glass p-8 md:p-12 rounded-[2.5rem] md:rounded-[4rem] space-y-8 md:space-y-10 border border-white/5 text-center">
+              <h3 className="text-2xl md:text-3xl font-black text-white uppercase italic tracking-tighter">PIN <span className="text-indigo-500 not-italic">CONFIGURATION</span></h3>
+              <div className="space-y-4 md:space-y-6 text-left">
+                <div className="space-y-2">
+                  <label className="text-[9px] md:text-[10px] font-black text-slate-600 uppercase tracking-widest px-2">Owner PIN</label>
+                  <input type="text" value={tempPasswords.admin} onChange={e => setTempPasswords({...tempPasswords, admin: e.target.value})} className="w-full bg-slate-950/80 border border-white/10 rounded-xl md:rounded-[1.5rem] px-6 md:px-8 py-4 md:py-5 text-white font-black tracking-[0.3em] md:tracking-[0.5em] text-xl md:text-2xl outline-none focus:border-indigo-500" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[9px] md:text-[10px] font-black text-slate-600 uppercase tracking-widest px-2">Agent PIN</label>
+                  <input type="text" value={tempPasswords.agent} onChange={e => setTempPasswords({...tempPasswords, agent: e.target.value})} className="w-full bg-slate-950/80 border border-white/10 rounded-xl md:rounded-[1.5rem] px-6 md:px-8 py-4 md:py-5 text-white font-black tracking-[0.3em] md:tracking-[0.5em] text-xl md:text-2xl outline-none focus:border-indigo-500" />
+                </div>
               </div>
-              <div className="space-y-3">
-                <label className="text-[9px] font-black text-slate-600 uppercase ml-4 tracking-widest">Agent Staff PIN</label>
-                <input type="text" value={tempPasswords.agent} onChange={e => setTempPasswords({...tempPasswords, agent: e.target.value})} className="w-full bg-slate-950 border border-white/5 rounded-3xl px-8 py-5 text-white text-center font-black tracking-[0.6em] text-2xl shadow-inner" />
-              </div>
-              <button onClick={async () => { await onUpdatePasswords(tempPasswords); alert("System Security Updated."); }} className="w-full py-6 bg-emerald-600 text-white rounded-[2rem] font-black text-xs uppercase tracking-[0.2em] shadow-2xl hover:bg-emerald-500 transition-all active:scale-95">Update Access Keys</button>
-              
-              <div className="pt-10 border-t border-white/5">
-                <button onClick={() => { if(confirm("DANGER: WIPE ALL CRM DATA PERMANENTLY?")) clearAllData().then(() => window.location.reload()); }} className="w-full py-4 bg-red-600/10 text-red-500 border border-red-600/20 rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-red-600 hover:text-white transition-all">Clear System Database</button>
-              </div>
-            </div>
-          </div>
+              <button onClick={async () => { setIsProcessing(true); await onUpdatePasswords(tempPasswords); setIsProcessing(false); alert("PINs Updated!"); }} disabled={isProcessing} className="w-full py-5 md:py-7 bg-indigo-600 text-white rounded-2xl md:rounded-[2rem] font-black text-[10px] md:text-[11px] uppercase tracking-widest shadow-xl active:scale-95 transition-all">UPDATE SYSTEM PIN</button>
+           </div>
         </div>
       )}
     </div>
   );
 };
 
+// Fixed: Added default export
 export default OwnerDashboard;
